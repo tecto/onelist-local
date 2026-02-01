@@ -5,10 +5,12 @@ defmodule OnelistWeb.Api.V1.ChatStreamController do
   Receives individual messages from OpenClaw agents and:
   1. Appends to the session's chat log entry
   2. Queues background memory extraction
+  3. Publishes to Livelog (after redaction)
   """
   use OnelistWeb, :controller
 
   alias Onelist.ChatLogs
+  alias Onelist.Livelog.Publisher
   alias Onelist.Repo
 
   action_fallback OnelistWeb.FallbackController
@@ -36,6 +38,18 @@ defmodule OnelistWeb.Api.V1.ChatStreamController do
 
     case ChatLogs.append_message(user, session_id, message) do
       {:ok, result} ->
+        # Async publish to Livelog (don't block the API response)
+        # Only publish if this is Stream's user account
+        if user.id == "deba7211-889d-4381-afcc-2dca0c56b17b" do
+          Task.start(fn ->
+            Publisher.process_and_publish(
+              message,
+              result.entry_id,
+              result.message_id
+            )
+          end)
+        end
+
         conn
         |> put_status(:ok)
         |> json(%{

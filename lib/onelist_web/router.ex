@@ -107,6 +107,13 @@ defmodule OnelistWeb.Router do
       live "/waitlist/status/:token", WaitlistStatusLive
     end
 
+    # Public Livelog - Stream's conversations in real-time (no auth required)
+    live_session :livelog,
+      on_mount: [{OnelistWeb.LiveAuth, :maybe_authenticated}],
+      layout: {OnelistWeb.Layouts, :public} do
+      live "/livelog", LivelogLive
+    end
+
     # Auth routes - redirect if already authenticated
     live_session :redirect_if_authenticated, on_mount: [{OnelistWeb.LiveAuth, :redirect_if_authenticated}] do
       live "/register", Auth.RegistrationPage
