@@ -105,10 +105,17 @@ defmodule Onelist.Waitlist do
   end
 
   defp broadcast_signup_update do
+    # Get the most recent signup for the live feed
+    recent = List.first(list_recent_signups(1))
+    
     Phoenix.PubSub.broadcast(
       Onelist.PubSub,
       "waitlist:updates",
-      {:waitlist_updated, %{remaining: remaining_spots(), total: count_signups()}}
+      {:waitlist_updated, %{
+        remaining: remaining_spots(), 
+        total: count_signups(),
+        new_signup: recent
+      }}
     )
   end
 
@@ -144,6 +151,24 @@ defmodule Onelist.Waitlist do
       estimated_wait: estimate_wait(ahead_in_queue),
       signed_up_at: signup.inserted_at
     }
+  end
+
+  @doc """
+  Lists the most recent signups for the live feed.
+  Returns signups in reverse chronological order (newest first).
+  """
+  def list_recent_signups(limit \\ 5) do
+    query = from s in Signup,
+      order_by: [desc: s.inserted_at],
+      limit: ^limit,
+      select: %{
+        name: s.name,
+        reason: s.reason,
+        queue_number: s.queue_number,
+        inserted_at: s.inserted_at
+      }
+    
+    Repo.all(query)
   end
 
   @doc """
