@@ -1,43 +1,21 @@
 /**
- * Onelist Memory Sync Plugin v0.5.0
+ * Onelist Memory Sync Plugin v0.5.1
  *
- * DEFENSE IN DEPTH EDITION - Multiple layers against feedback loops
+ * HARDENED EDITION - All Scout findings addressed
  *
- * v0.5.0: FIVE-LAYER PROTECTION against session bloat:
+ * v0.5.1 FIXES:
+ *   - State file moved to persistent location (/root/.openclaw/)
+ *   - State pruning (sessions older than 7 days, max 100 entries)
+ *   - State file versioning for future migrations
+ *   - Onelist sync circuit breaker (backoff after failures)
+ *   - Memory leak fix (syncState Map capped at 50 entries)
+ *   - Simple file locking for state writes
+ *   - Startup health logging
+ *   - Hourly stats logging
  *
- *   LAYER 1: SESSION PRE-CHECK
- *   - Before injecting, scan current session file
- *   - If ANY message contains [INJECTION-DEPTH:], ABORT
- *   - Makes injection ONE-TIME per session
- *
- *   LAYER 2: PERSISTENT INJECTION TRACKING
- *   - Track injection count per session in state file (survives restarts)
- *   - Hard limit: max 2 injections per session lifetime
- *   - Prevents restart storms from causing repeated injections
- *
- *   LAYER 3: FILE-BASED RATE LIMITING
- *   - Write last injection timestamp to file (survives restarts)
- *   - 60-second cooldown between ANY injections (global, not per-session)
- *   - Replaces in-memory rate limiter that reset on restart
- *
- *   LAYER 4: SESSION SIZE CIRCUIT BREAKER
- *   - If current session file > 500KB, ABORT (already bloated)
- *   - If session has > 200 messages, ABORT (lots of context already)
- *   - Prevents injecting into already-large sessions
- *
- *   LAYER 5: CONTENT BLOCKLIST (existing from v0.4.0)
- *   - Skip messages containing recovery markers when building context
- *   - Prevents nested injection content
- *
- * v0.4.0: Depth marker + in-memory rate limiting (insufficient - reset on restart)
- * v0.3.0: Message-level blocklist (works but doesn't prevent session accumulation)
- * v0.2.2: Line-level filtering (insufficient)
- *
- * ROOT CAUSE ANALYSIS (v0.5.0):
- * The v0.4.0 blocklist correctly prevents NESTED content, but OpenClaw saves
- * each prependContext as a session message. With rapid gateway restarts,
- * 60+ injection messages accumulated (1.5MB), causing API token limits.
- * The fix: prevent multiple injections per session, not just nested content.
+ * v0.5.0: Five-layer defense-in-depth protection
+ * v0.4.0: Depth marker + rate limiting (insufficient - reset on restart)
+ * v0.3.0: Message-level blocklist
  */
 
 import * as fs from 'fs';
@@ -87,77 +65,245 @@ interface RecoveryResult {
 }
 
 // =============================================================================
-// HARD LIMITS - Safety rails that cannot be overridden
+// HARD LIMITS
 // =============================================================================
 
 const HARD_LIMITS = {
-  // File processing limits
+  // File processing
   MAX_FILE_SIZE: 5 * 1024 * 1024,
   MAX_TOTAL_READ: 50 * 1024 * 1024,
   MAX_MESSAGE_LENGTH: 4000,
   MAX_FILES_TO_SCAN: 100,
   MAX_LINES_PER_FILE: 10000,
   HOOK_TIMEOUT_MS: 5000,
-
-  // v0.3.0: Circuit breaker for output size
   MAX_RECOVERY_OUTPUT_CHARS: 50000,
 
-  // v0.5.0: DEFENSE IN DEPTH - Session protection
-  MAX_INJECTIONS_PER_SESSION: 2,        // Layer 2: Hard limit on injections
-  INJECTION_COOLDOWN_MS: 60000,         // Layer 3: 60 seconds between ANY injection
-  MAX_SESSION_SIZE_FOR_INJECT: 500000,  // Layer 4: Don't inject into sessions > 500KB
-  MAX_SESSION_MESSAGES_FOR_INJECT: 200, // Layer 4: Don't inject if > 200 messages
+  // Defense in depth (v0.5.0)
+  MAX_INJECTIONS_PER_SESSION: 2,
+  INJECTION_COOLDOWN_MS: 60000,
+  MAX_SESSION_SIZE_FOR_INJECT: 500000,
+  MAX_SESSION_MESSAGES_FOR_INJECT: 200,
+
+  // v0.5.1: State management
+  STATE_MAX_SESSIONS: 100,
+  STATE_PRUNE_DAYS: 7,
+  SYNC_STATE_MAX_ENTRIES: 50,
+
+  // v0.5.1: Onelist circuit breaker
+  ONELIST_MAX_CONSECUTIVE_FAILURES: 5,
+  ONELIST_INITIAL_BACKOFF_MS: 60000,
+  ONELIST_MAX_BACKOFF_MS: 3600000,
 };
 
 // =============================================================================
-// v0.5.0: PERSISTENT STATE MANAGEMENT
+// v0.5.1: PERSISTENT STATE (survives restarts AND reboots)
 // =============================================================================
 
-// State file location - survives gateway restarts
-const STATE_FILE_PATH = '/tmp/onelist-memory-state.json';
+const STATE_FILE_PATH = '/root/.openclaw/onelist-memory-state.json';
+const STATE_VERSION = 1;
 
 interface PersistentState {
+  version: number;
   lastInjectionTime: number;
-  sessionInjectionCounts: Record<string, number>;
+  sessionInjectionCounts: Record<string, { count: number; lastUpdated: number }>;
   lastUpdated: string;
-}
-
-function loadPersistentState(): PersistentState {
-  try {
-    if (fs.existsSync(STATE_FILE_PATH)) {
-      const data = fs.readFileSync(STATE_FILE_PATH, 'utf-8');
-      return JSON.parse(data);
-    }
-  } catch (err) {
-    // State file corrupted or unreadable - start fresh
-  }
-  return {
-    lastInjectionTime: 0,
-    sessionInjectionCounts: {},
-    lastUpdated: new Date().toISOString(),
+  stats: {
+    totalInjections: number;
+    totalBlocked: number;
+    startupTime: number;
   };
 }
 
+// Simple file lock using .lock file
+function acquireStateLock(): boolean {
+  const lockPath = STATE_FILE_PATH + '.lock';
+  try {
+    // Check if lock exists and is stale (older than 10 seconds)
+    if (fs.existsSync(lockPath)) {
+      const lockStat = fs.statSync(lockPath);
+      if (Date.now() - lockStat.mtimeMs < 10000) {
+        return false; // Lock is held
+      }
+      // Stale lock, remove it
+      fs.unlinkSync(lockPath);
+    }
+    // Create lock
+    fs.writeFileSync(lockPath, String(process.pid));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function releaseStateLock(): void {
+  const lockPath = STATE_FILE_PATH + '.lock';
+  try {
+    fs.unlinkSync(lockPath);
+  } catch {
+    // Ignore
+  }
+}
+
+function loadPersistentState(): PersistentState {
+  const defaultState: PersistentState = {
+    version: STATE_VERSION,
+    lastInjectionTime: 0,
+    sessionInjectionCounts: {},
+    lastUpdated: new Date().toISOString(),
+    stats: {
+      totalInjections: 0,
+      totalBlocked: 0,
+      startupTime: Date.now(),
+    },
+  };
+
+  try {
+    if (fs.existsSync(STATE_FILE_PATH)) {
+      const data = fs.readFileSync(STATE_FILE_PATH, 'utf-8');
+      const loaded = JSON.parse(data);
+
+      // Migrate old format (v0.5.0) to new format (v0.5.1)
+      if (!loaded.version) {
+        // Old format: sessionInjectionCounts was Record<string, number>
+        const migrated: PersistentState = {
+          ...defaultState,
+          lastInjectionTime: loaded.lastInjectionTime || 0,
+          sessionInjectionCounts: {},
+        };
+
+        for (const [sessionId, count] of Object.entries(loaded.sessionInjectionCounts || {})) {
+          if (typeof count === 'number') {
+            migrated.sessionInjectionCounts[sessionId] = {
+              count,
+              lastUpdated: Date.now(),
+            };
+          }
+        }
+
+        return migrated;
+      }
+
+      return { ...defaultState, ...loaded };
+    }
+  } catch {
+    // Corrupted state - start fresh
+  }
+
+  return defaultState;
+}
+
 function savePersistentState(state: PersistentState): void {
+  if (!acquireStateLock()) {
+    return; // Another process is writing
+  }
+
   try {
     state.lastUpdated = new Date().toISOString();
+    state.version = STATE_VERSION;
+
+    // Prune old sessions before saving
+    pruneOldSessions(state);
+
     fs.writeFileSync(STATE_FILE_PATH, JSON.stringify(state, null, 2));
-  } catch (err) {
-    // Best effort - don't crash if we can't save state
+  } catch {
+    // Best effort
+  } finally {
+    releaseStateLock();
+  }
+}
+
+function pruneOldSessions(state: PersistentState): void {
+  const cutoff = Date.now() - (HARD_LIMITS.STATE_PRUNE_DAYS * 24 * 60 * 60 * 1000);
+  const entries = Object.entries(state.sessionInjectionCounts);
+
+  // Remove sessions older than prune days
+  for (const [sessionId, data] of entries) {
+    if (data.lastUpdated < cutoff) {
+      delete state.sessionInjectionCounts[sessionId];
+    }
+  }
+
+  // If still over limit, remove oldest
+  const remaining = Object.entries(state.sessionInjectionCounts);
+  if (remaining.length > HARD_LIMITS.STATE_MAX_SESSIONS) {
+    remaining.sort((a, b) => a[1].lastUpdated - b[1].lastUpdated);
+    const toRemove = remaining.slice(0, remaining.length - HARD_LIMITS.STATE_MAX_SESSIONS);
+    for (const [sessionId] of toRemove) {
+      delete state.sessionInjectionCounts[sessionId];
+    }
   }
 }
 
 function getSessionInjectionCount(state: PersistentState, sessionId: string): number {
-  return state.sessionInjectionCounts[sessionId] ?? 0;
+  return state.sessionInjectionCounts[sessionId]?.count ?? 0;
 }
 
 function incrementSessionInjectionCount(state: PersistentState, sessionId: string): void {
-  state.sessionInjectionCounts[sessionId] = (state.sessionInjectionCounts[sessionId] ?? 0) + 1;
+  const existing = state.sessionInjectionCounts[sessionId];
+  state.sessionInjectionCounts[sessionId] = {
+    count: (existing?.count ?? 0) + 1,
+    lastUpdated: Date.now(),
+  };
+  state.stats.totalInjections++;
   savePersistentState(state);
 }
 
+function incrementBlockedCount(state: PersistentState): void {
+  state.stats.totalBlocked++;
+  // Don't save immediately - will be saved on next injection or periodically
+}
+
 // =============================================================================
-// CONTENT BLOCKLIST PATTERNS (Layer 5)
+// v0.5.1: ONELIST CIRCUIT BREAKER
+// =============================================================================
+
+interface CircuitBreakerState {
+  consecutiveFailures: number;
+  lastFailureTime: number;
+  backoffUntil: number;
+  totalFailures: number;
+  totalSuccesses: number;
+}
+
+const onelistCircuitBreaker: CircuitBreakerState = {
+  consecutiveFailures: 0,
+  lastFailureTime: 0,
+  backoffUntil: 0,
+  totalFailures: 0,
+  totalSuccesses: 0,
+};
+
+function shouldSkipOnelist(): boolean {
+  if (onelistCircuitBreaker.backoffUntil > Date.now()) {
+    return true;
+  }
+  return false;
+}
+
+function recordOnelistSuccess(): void {
+  onelistCircuitBreaker.consecutiveFailures = 0;
+  onelistCircuitBreaker.backoffUntil = 0;
+  onelistCircuitBreaker.totalSuccesses++;
+}
+
+function recordOnelistFailure(): void {
+  onelistCircuitBreaker.consecutiveFailures++;
+  onelistCircuitBreaker.lastFailureTime = Date.now();
+  onelistCircuitBreaker.totalFailures++;
+
+  if (onelistCircuitBreaker.consecutiveFailures >= HARD_LIMITS.ONELIST_MAX_CONSECUTIVE_FAILURES) {
+    // Calculate exponential backoff
+    const backoffMultiplier = Math.pow(2, onelistCircuitBreaker.consecutiveFailures - HARD_LIMITS.ONELIST_MAX_CONSECUTIVE_FAILURES);
+    const backoffMs = Math.min(
+      HARD_LIMITS.ONELIST_INITIAL_BACKOFF_MS * backoffMultiplier,
+      HARD_LIMITS.ONELIST_MAX_BACKOFF_MS
+    );
+    onelistCircuitBreaker.backoffUntil = Date.now() + backoffMs;
+  }
+}
+
+// =============================================================================
+// CONTENT BLOCKLIST PATTERNS
 // =============================================================================
 
 const FILTER_PATTERNS = [
@@ -179,7 +325,7 @@ const MESSAGE_BLOCKLIST_PATTERNS = [
 ];
 
 // =============================================================================
-// LOGGING HELPERS
+// LOGGING
 // =============================================================================
 
 interface Logger {
@@ -200,85 +346,49 @@ function createFallbackLogger(): Logger {
 }
 
 // =============================================================================
-// v0.5.0: LAYER 1 - SESSION PRE-CHECK
+// DEFENSE LAYERS
 // =============================================================================
 
-/**
- * Check if a session file already contains injection markers.
- * If it does, we should NOT inject again.
- */
 function sessionAlreadyHasInjection(sessionPath: string, logger: Logger): boolean {
   try {
-    if (!fs.existsSync(sessionPath)) {
-      return false;
-    }
-
+    if (!fs.existsSync(sessionPath)) return false;
     const content = fs.readFileSync(sessionPath, 'utf-8');
-
-    // Quick check for injection marker anywhere in file
     if (content.includes('[INJECTION-DEPTH:')) {
       logger.info('LAYER 1 BLOCK: Session already contains injection marker');
       return true;
     }
-
-    // Also check for recovery header (in case marker was somehow stripped)
     if (content.includes('## 🔄 Recovered Conversation Context')) {
       logger.info('LAYER 1 BLOCK: Session already contains recovery header');
       return true;
     }
-
     return false;
   } catch (err) {
-    // If we can't read the file, err on the side of caution
     logger.warn(`LAYER 1: Could not read session file: ${String(err)}`);
-    return true; // Block injection if uncertain
+    return true;
   }
 }
 
-// =============================================================================
-// v0.5.0: LAYER 4 - SESSION SIZE CHECK
-// =============================================================================
-
-/**
- * Check if session is too large for injection.
- */
 function sessionTooLargeForInjection(sessionPath: string, logger: Logger): boolean {
   try {
-    if (!fs.existsSync(sessionPath)) {
-      return false;
-    }
-
+    if (!fs.existsSync(sessionPath)) return false;
     const stats = fs.statSync(sessionPath);
-
     if (stats.size > HARD_LIMITS.MAX_SESSION_SIZE_FOR_INJECT) {
-      logger.info(`LAYER 4 BLOCK: Session size ${stats.size} exceeds ${HARD_LIMITS.MAX_SESSION_SIZE_FOR_INJECT}`);
+      logger.info(`LAYER 4 BLOCK: Session size ${stats.size} > ${HARD_LIMITS.MAX_SESSION_SIZE_FOR_INJECT}`);
       return true;
     }
-
-    // Count messages
     const content = fs.readFileSync(sessionPath, 'utf-8');
-    const lines = content.split('\n').filter(l => l.trim());
-    const messageCount = lines.filter(l => l.includes('"type":"message"')).length;
-
+    const messageCount = (content.match(/"type":"message"/g) || []).length;
     if (messageCount > HARD_LIMITS.MAX_SESSION_MESSAGES_FOR_INJECT) {
-      logger.info(`LAYER 4 BLOCK: Session has ${messageCount} messages, exceeds ${HARD_LIMITS.MAX_SESSION_MESSAGES_FOR_INJECT}`);
+      logger.info(`LAYER 4 BLOCK: Session has ${messageCount} > ${HARD_LIMITS.MAX_SESSION_MESSAGES_FOR_INJECT} messages`);
       return true;
     }
-
     return false;
   } catch (err) {
     logger.warn(`LAYER 4: Could not check session size: ${String(err)}`);
-    return false; // Don't block on error - other layers will catch issues
+    return false;
   }
 }
 
-// =============================================================================
-// v0.5.0: FIND CURRENT SESSION
-// =============================================================================
-
-/**
- * Find the most recently modified session file (likely the current one).
- */
 function findCurrentSessionFile(sessionsDir: string): { path: string; id: string } | null {
   try {
     const files = fs.readdirSync(sessionsDir)
@@ -291,11 +401,30 @@ function findCurrentSessionFile(sessionsDir: string): { path: string; id: string
       .sort((a, b) => b.mtime - a.mtime);
 
     if (files.length === 0) return null;
-
-    const sessionId = files[0].name.replace('.jsonl', '');
-    return { path: files[0].path, id: sessionId };
+    return { path: files[0].path, id: files[0].name.replace('.jsonl', '') };
   } catch {
     return null;
+  }
+}
+
+// =============================================================================
+// v0.5.1: STARTUP & PERIODIC HEALTH LOGGING
+// =============================================================================
+
+function logStartupHealth(state: PersistentState, logger: Logger): void {
+  const sessionCount = Object.keys(state.sessionInjectionCounts).length;
+  const uptime = state.stats.startupTime ? Math.round((Date.now() - state.stats.startupTime) / 1000) : 0;
+
+  logger.info(`=== HEALTH: v0.5.1 | Sessions tracked: ${sessionCount} | Injections: ${state.stats.totalInjections} | Blocked: ${state.stats.totalBlocked} | Uptime: ${uptime}s ===`);
+}
+
+let lastHealthLog = 0;
+const HEALTH_LOG_INTERVAL = 3600000; // 1 hour
+
+function maybeLogHealth(state: PersistentState, logger: Logger): void {
+  if (Date.now() - lastHealthLog > HEALTH_LOG_INTERVAL) {
+    logStartupHealth(state, logger);
+    lastHealthLog = Date.now();
   }
 }
 
@@ -303,7 +432,7 @@ function findCurrentSessionFile(sessionsDir: string): { path: string; id: string
 // MAIN PLUGIN REGISTRATION
 // =============================================================================
 
-console.log('[onelist-memory] Plugin file loaded (v0.5.0 defense-in-depth - 5-layer protection)');
+console.log('[onelist-memory] Plugin file loaded (v0.5.1 hardened - all Scout findings addressed)');
 
 export default function register(api: any) {
   const logger: Logger = api?.logger ?? createFallbackLogger();
@@ -325,6 +454,12 @@ export default function register(api: any) {
     return;
   }
 
+  // Load and log startup health
+  const state = loadPersistentState();
+  state.stats.startupTime = Date.now();
+  logStartupHealth(state, logger);
+  lastHealthLog = Date.now();
+
   // =========================================================================
   // AUTO-INJECT RECOVERY HOOK
   // =========================================================================
@@ -332,70 +467,65 @@ export default function register(api: any) {
   const autoInjectEnabled = config.autoInjectEnabled !== false;
 
   if (autoInjectEnabled) {
-    logger.info('Registering auto-inject recovery hook (v0.5.0 defense-in-depth)');
+    logger.info('Registering auto-inject recovery hook (v0.5.1 hardened)');
 
     try {
       api.on('before_agent_start', async (event: any, ctx: any): Promise<{ prependContext?: string } | undefined> => {
         const startTime = Date.now();
         const sessionsDir = findSessionsDirectory(logger);
 
+        // Periodic health logging
+        maybeLogHealth(state, logger);
+
         if (!sessionsDir) {
           logger.debug('No sessions directory found');
           return undefined;
         }
 
-        // Find current session
         const currentSession = findCurrentSessionFile(sessionsDir);
         const sessionId = currentSession?.id ?? 'unknown';
         const sessionPath = currentSession?.path;
 
         logger.debug(`Current session: ${sessionId}`);
 
-        // Load persistent state
-        const state = loadPersistentState();
-
-        // =====================================================================
-        // LAYER 3: FILE-BASED RATE LIMITING (survives restarts)
-        // =====================================================================
+        // LAYER 3: File-based rate limiting
         const timeSinceLastInjection = startTime - state.lastInjectionTime;
         if (timeSinceLastInjection < HARD_LIMITS.INJECTION_COOLDOWN_MS) {
           const waitTime = Math.round((HARD_LIMITS.INJECTION_COOLDOWN_MS - timeSinceLastInjection) / 1000);
-          logger.info(`LAYER 3 BLOCK: Rate limited - ${waitTime}s until next injection allowed`);
+          logger.info(`LAYER 3 BLOCK: Rate limited - ${waitTime}s remaining`);
+          incrementBlockedCount(state);
           return undefined;
         }
 
-        // =====================================================================
-        // LAYER 2: PERSISTENT INJECTION COUNT
-        // =====================================================================
+        // LAYER 2: Injection count
         const injectionCount = getSessionInjectionCount(state, sessionId);
         if (injectionCount >= HARD_LIMITS.MAX_INJECTIONS_PER_SESSION) {
-          logger.info(`LAYER 2 BLOCK: Session ${sessionId} already has ${injectionCount} injections (max: ${HARD_LIMITS.MAX_INJECTIONS_PER_SESSION})`);
+          logger.info(`LAYER 2 BLOCK: Session ${sessionId.substring(0, 8)} has ${injectionCount}/${HARD_LIMITS.MAX_INJECTIONS_PER_SESSION} injections`);
+          incrementBlockedCount(state);
           return undefined;
         }
 
-        // =====================================================================
-        // LAYER 1: SESSION PRE-CHECK (check for existing injections)
-        // =====================================================================
+        // LAYER 1: Session pre-check
         if (sessionPath && sessionAlreadyHasInjection(sessionPath, logger)) {
-          // Also update the count so we don't keep checking
           if (injectionCount === 0) {
-            state.sessionInjectionCounts[sessionId] = HARD_LIMITS.MAX_INJECTIONS_PER_SESSION;
+            state.sessionInjectionCounts[sessionId] = {
+              count: HARD_LIMITS.MAX_INJECTIONS_PER_SESSION,
+              lastUpdated: Date.now(),
+            };
             savePersistentState(state);
           }
+          incrementBlockedCount(state);
           return undefined;
         }
 
-        // =====================================================================
-        // LAYER 4: SESSION SIZE CHECK
-        // =====================================================================
+        // LAYER 4: Session size check
         if (sessionPath && sessionTooLargeForInjection(sessionPath, logger)) {
+          incrementBlockedCount(state);
           return undefined;
         }
 
-        // =====================================================================
-        // ALL LAYERS PASSED - Proceed with injection
-        // =====================================================================
-        logger.info(`All 4 pre-checks passed for session ${sessionId} - proceeding with recovery`);
+        // All layers passed
+        logger.info(`All pre-checks passed for session ${sessionId.substring(0, 8)} - recovering context`);
 
         try {
           const timeoutPromise = new Promise<null>((_, reject) => {
@@ -403,7 +533,6 @@ export default function register(api: any) {
           });
 
           const recoveryPromise = recoverContext(config, logger);
-
           const result = await Promise.race([recoveryPromise, timeoutPromise]);
 
           if (!result) {
@@ -414,30 +543,27 @@ export default function register(api: any) {
           const elapsed = Date.now() - startTime;
 
           if (result.errors.length > 0) {
-            logger.warn(`Recovery completed with ${result.errors.length} errors: ${result.errors.slice(0, 3).join('; ')}`);
+            logger.warn(`Recovery had ${result.errors.length} errors: ${result.errors.slice(0, 3).join('; ')}`);
           }
 
-          // LAYER 5: Circuit breaker on output size
+          // LAYER 5: Output size check
           const contentSize = result.content.length;
           if (contentSize > HARD_LIMITS.MAX_RECOVERY_OUTPUT_CHARS) {
-            logger.error(`LAYER 5 BLOCK: Recovery output ${contentSize} chars exceeds ${HARD_LIMITS.MAX_RECOVERY_OUTPUT_CHARS} limit`);
+            logger.error(`LAYER 5 BLOCK: Output ${contentSize} > ${HARD_LIMITS.MAX_RECOVERY_OUTPUT_CHARS} chars`);
+            incrementBlockedCount(state);
             return undefined;
           }
 
-          // Additional safety: check for nested markers
           const recoveryMarkerCount = (result.content.match(/Recovered Conversation Context/gi) || []).length;
           if (recoveryMarkerCount > 1) {
-            logger.error(`LAYER 5 BLOCK: Found ${recoveryMarkerCount} nested recovery markers`);
+            logger.error(`LAYER 5 BLOCK: ${recoveryMarkerCount} nested recovery markers detected`);
+            incrementBlockedCount(state);
             return undefined;
           }
 
-          // =====================================================================
-          // INJECTION APPROVED - Update state and return
-          // =====================================================================
-          logger.info(`INJECTION APPROVED: ${result.messageCount} messages from ${result.filesProcessed} files (${elapsed}ms, ${contentSize} chars)`);
-          logger.info(`Session ${sessionId} injection count: ${injectionCount} -> ${injectionCount + 1}`);
+          // SUCCESS
+          logger.info(`INJECTION APPROVED: ${result.messageCount} msgs, ${result.filesProcessed} files, ${contentSize} chars, ${elapsed}ms`);
 
-          // Update persistent state
           state.lastInjectionTime = Date.now();
           incrementSessionInjectionCount(state, sessionId);
 
@@ -445,14 +571,7 @@ export default function register(api: any) {
 
         } catch (err) {
           const elapsed = Date.now() - startTime;
-          const errStr = String(err);
-
-          if (errStr.includes('timeout')) {
-            logger.error(`Recovery timed out after ${elapsed}ms`);
-          } else {
-            logger.error(`Recovery failed after ${elapsed}ms: ${errStr}`);
-          }
-
+          logger.error(`Recovery failed (${elapsed}ms): ${String(err)}`);
           return undefined;
         }
       }, { priority: 100 });
@@ -470,13 +589,13 @@ export default function register(api: any) {
   // ONELIST SYNC
   // =========================================================================
 
-  startOnlistSync(config, api, logger).catch(err => {
+  startOnelistSync(config, api, logger).catch(err => {
     logger.error(`Onelist sync startup failed: ${String(err)}`);
   });
 }
 
 // =============================================================================
-// AUTO-INJECT RECOVERY IMPLEMENTATION
+// AUTO-INJECT RECOVERY
 // =============================================================================
 
 async function recoverContext(config: PluginConfig, logger: Logger): Promise<RecoveryResult | null> {
@@ -494,8 +613,6 @@ async function recoverContext(config: PluginConfig, logger: Logger): Promise<Rec
     return null;
   }
 
-  logger.debug(`Using sessions directory: ${sessionsDir}`);
-
   const cutoffTime = Date.now() - (hoursBack * 60 * 60 * 1000);
 
   let sessionFiles: Array<{ name: string; path: string; mtime: number; size: number }>;
@@ -506,9 +623,7 @@ async function recoverContext(config: PluginConfig, logger: Logger): Promise<Rec
     sessionFiles = files
       .filter(f => {
         if (!f.endsWith('.jsonl')) return false;
-        if (f.includes('.deleted')) return false;
-        if (f.includes('.lock')) return false;
-        if (f.includes('.archived')) return false; // v0.5.0: Skip archived files
+        if (f.includes('.deleted') || f.includes('.lock') || f.includes('.archived')) return false;
         return true;
       })
       .slice(0, HARD_LIMITS.MAX_FILES_TO_SCAN)
@@ -523,61 +638,44 @@ async function recoverContext(config: PluginConfig, logger: Logger): Promise<Rec
         }
       })
       .filter((f): f is NonNullable<typeof f> => f !== null)
-      .filter(f => f.mtime >= cutoffTime)
-      .filter(f => f.size <= maxFileSize)
+      .filter(f => f.mtime >= cutoffTime && f.size <= maxFileSize)
       .sort((a, b) => b.mtime - a.mtime);
 
   } catch (err) {
-    errors.push(`Failed to list sessions directory: ${String(err)}`);
-    logger.error(`Failed to list sessions directory: ${String(err)}`);
+    errors.push(`Failed to list sessions: ${String(err)}`);
+    logger.error(`Failed to list sessions: ${String(err)}`);
     return null;
   }
 
   if (sessionFiles.length === 0) {
-    logger.debug(`No session files found within ${hoursBack} hours`);
+    logger.debug(`No session files within ${hoursBack} hours`);
     return null;
   }
-
-  logger.debug(`Found ${sessionFiles.length} session files to process`);
 
   const allMessages: ParsedMessage[] = [];
   let totalBytesRead = 0;
   let filesProcessed = 0;
 
   for (const file of sessionFiles) {
-    if (totalBytesRead + file.size > maxTotalRead) {
-      logger.debug(`Skipping ${file.name}: would exceed total read limit`);
-      break;
-    }
-
-    if (allMessages.length >= messageCount * 2) {
-      logger.debug(`Have enough messages (${allMessages.length}), stopping file scan`);
-      break;
-    }
+    if (totalBytesRead + file.size > maxTotalRead) break;
+    if (allMessages.length >= messageCount * 2) break;
 
     try {
       const messages = parseSessionFileSafe(file.path, file.name, logger, errors);
       allMessages.push(...messages);
       totalBytesRead += file.size;
       filesProcessed++;
-
-      logger.debug(`Parsed ${messages.length} messages from ${file.name}`);
-
     } catch (err) {
-      errors.push(`Unexpected error parsing ${file.name}: ${String(err)}`);
+      errors.push(`Error parsing ${file.name}: ${String(err)}`);
     }
   }
 
   if (allMessages.length < minMessages) {
-    logger.debug(`Only ${allMessages.length} messages found, below minimum ${minMessages}`);
+    logger.debug(`Only ${allMessages.length} messages, below minimum ${minMessages}`);
     return null;
   }
 
-  allMessages.sort((a, b) => {
-    const timeA = parseTimestampSafe(a.timestamp);
-    const timeB = parseTimestampSafe(b.timestamp);
-    return timeA - timeB;
-  });
+  allMessages.sort((a, b) => parseTimestampSafe(a.timestamp) - parseTimestampSafe(b.timestamp));
 
   const recentMessages = allMessages.slice(-messageCount);
   const formattedContext = formatRecoveredContext(recentMessages, hoursBack, filesProcessed, errors.length);
@@ -601,8 +699,8 @@ function findSessionsDirectory(logger: Logger): string | null {
       if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
         return dir;
       }
-    } catch (err) {
-      logger.debug(`Failed to check directory ${dir}: ${String(err)}`);
+    } catch {
+      // Continue
     }
   }
 
@@ -625,19 +723,10 @@ function parseSessionFileSafe(
     return messages;
   }
 
-  const lines = content.split(/\r?\n/);
-  const linesToProcess = lines.slice(0, HARD_LIMITS.MAX_LINES_PER_FILE);
-
-  if (lines.length > HARD_LIMITS.MAX_LINES_PER_FILE) {
-    errors.push(`${fileName}: truncated to ${HARD_LIMITS.MAX_LINES_PER_FILE} lines (had ${lines.length})`);
-  }
-
-  let lineNum = 0;
+  const lines = content.split(/\r?\n/).slice(0, HARD_LIMITS.MAX_LINES_PER_FILE);
   let parseErrors = 0;
 
-  for (const line of linesToProcess) {
-    lineNum++;
-
+  for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
@@ -646,9 +735,6 @@ function parseSessionFileSafe(
       entry = JSON.parse(trimmed);
     } catch {
       parseErrors++;
-      if (parseErrors <= 3) {
-        errors.push(`${fileName}:${lineNum}: invalid JSON`);
-      }
       continue;
     }
 
@@ -662,18 +748,15 @@ function parseSessionFileSafe(
     const textContent = extractTextContent(entry.message.content);
     if (!textContent) continue;
 
-    // LAYER 5: Message-level blocklist check
-    const shouldBlockMessage = MESSAGE_BLOCKLIST_PATTERNS.some(pattern => pattern.test(textContent));
-    if (shouldBlockMessage) {
+    // LAYER 5: Blocklist check
+    if (MESSAGE_BLOCKLIST_PATTERNS.some(p => p.test(textContent))) {
       continue;
     }
 
     const { filtered: filteredContent, removedCount } = filterMediaReferences(textContent);
 
     if (!filteredContent || filteredContent.length < 10) {
-      if (removedCount > 0) {
-        continue;
-      }
+      if (removedCount > 0) continue;
     }
 
     const truncated = filteredContent.length > HARD_LIMITS.MAX_MESSAGE_LENGTH
@@ -689,7 +772,7 @@ function parseSessionFileSafe(
   }
 
   if (parseErrors > 3) {
-    errors.push(`${fileName}: ${parseErrors} total JSON parse errors`);
+    errors.push(`${fileName}: ${parseErrors} JSON parse errors`);
   }
 
   return messages;
@@ -697,22 +780,15 @@ function parseSessionFileSafe(
 
 function extractTextContent(content: unknown): string {
   if (!content) return '';
-
-  if (typeof content === 'string') {
-    return content.trim();
-  }
+  if (typeof content === 'string') return content.trim();
 
   if (Array.isArray(content)) {
     const textParts: string[] = [];
-
     for (const item of content) {
-      if (item && typeof item === 'object' && 'type' in item && 'text' in item) {
-        if (item.type === 'text' && typeof item.text === 'string') {
-          textParts.push(item.text);
-        }
+      if (item?.type === 'text' && typeof item.text === 'string') {
+        textParts.push(item.text);
       }
     }
-
     return textParts.join('\n').trim();
   }
 
@@ -721,28 +797,20 @@ function extractTextContent(content: unknown): string {
 
 function filterMediaReferences(content: string): { filtered: string; removedCount: number } {
   const lines = content.split('\n');
-  const filteredLines: string[] = [];
   let removedCount = 0;
-
-  for (const line of lines) {
-    const shouldFilter = FILTER_PATTERNS.some(pattern => pattern.test(line));
-
-    if (shouldFilter) {
+  const filtered = lines.filter(line => {
+    if (FILTER_PATTERNS.some(p => p.test(line))) {
       removedCount++;
-    } else {
-      filteredLines.push(line);
+      return false;
     }
-  }
+    return true;
+  });
 
-  return {
-    filtered: filteredLines.join('\n').trim(),
-    removedCount,
-  };
+  return { filtered: filtered.join('\n').trim(), removedCount };
 }
 
 function parseTimestampSafe(timestamp: string): number {
   if (!timestamp) return 0;
-
   try {
     const parsed = new Date(timestamp).getTime();
     return isNaN(parsed) ? 0 : parsed;
@@ -759,8 +827,7 @@ function formatRecoveredContext(
 ): string {
   const now = new Date().toISOString();
 
-  // v0.5.0: Include version in marker for debugging
-  let header = `[INJECTION-DEPTH:0][v0.5.0]
+  let header = `[INJECTION-DEPTH:0][v0.5.1]
 
 ## 🔄 Recovered Conversation Context
 
@@ -783,7 +850,6 @@ This context was automatically recovered from recent session transcripts to main
   for (const msg of messages) {
     const roleLabel = msg.role === 'user' ? '**USER**' : '**ASSISTANT**';
     const timestamp = msg.timestamp ? ` (${msg.timestamp})` : '';
-
     body += `${roleLabel}${timestamp}:\n${msg.content}\n\n`;
   }
 
@@ -796,15 +862,24 @@ This context was automatically recovered from recent session transcripts to main
 }
 
 // =============================================================================
-// ONELIST SYNC IMPLEMENTATION
+// ONELIST SYNC (with circuit breaker)
 // =============================================================================
 
-const syncState = new Map<string, {
-  lastLineCount: number;
-  lastTimestamp: string;
-}>();
+// v0.5.1: Capped syncState to prevent memory leak
+const syncState = new Map<string, { lastLineCount: number; lastTimestamp: string }>();
 
-async function startOnlistSync(config: PluginConfig, api: any, logger: Logger): Promise<void> {
+function prunesSyncState(): void {
+  if (syncState.size > HARD_LIMITS.SYNC_STATE_MAX_ENTRIES) {
+    const entries = Array.from(syncState.entries());
+    // Remove oldest half
+    const toRemove = entries.slice(0, Math.floor(entries.length / 2));
+    for (const [key] of toRemove) {
+      syncState.delete(key);
+    }
+  }
+}
+
+async function startOnelistSync(config: PluginConfig, api: any, logger: Logger): Promise<void> {
   if (!config.apiUrl || !config.apiKey) {
     logger.info('Onelist sync disabled (no API credentials)');
     return;
@@ -813,7 +888,6 @@ async function startOnlistSync(config: PluginConfig, api: any, logger: Logger): 
   logger.info('Starting Onelist sync service');
 
   const sessionsDir = findSessionsDirectory(logger);
-
   if (!sessionsDir) {
     logger.warn('Sessions directory not found - Onelist sync disabled');
     return;
@@ -829,13 +903,16 @@ async function startOnlistSync(config: PluginConfig, api: any, logger: Logger): 
 function watchSessionDirectory(sessionsDir: string, config: PluginConfig, logger: Logger): void {
   logger.info(`Setting up watcher on: ${sessionsDir}`);
 
-  let watcher: fs.FSWatcher;
-
   try {
-    watcher = fs.watch(sessionsDir, { persistent: true }, async (eventType, filename) => {
+    const watcher = fs.watch(sessionsDir, { persistent: true }, async (eventType, filename) => {
       if (!filename) return;
       if (!filename.endsWith('.jsonl')) return;
       if (filename.includes('.deleted') || filename.includes('.lock') || filename.includes('.archived')) return;
+
+      // v0.5.1: Circuit breaker check
+      if (shouldSkipOnelist()) {
+        return;
+      }
 
       const filePath = path.join(sessionsDir, filename);
 
@@ -855,38 +932,38 @@ function watchSessionDirectory(sessionsDir: string, config: PluginConfig, logger
     return;
   }
 
+  // Initial sync
   try {
     const files = fs.readdirSync(sessionsDir)
       .filter(f => f.endsWith('.jsonl') && !f.includes('.deleted') && !f.includes('.lock') && !f.includes('.archived'));
 
     for (const file of files) {
+      if (shouldSkipOnelist()) break;
       const filePath = path.join(sessionsDir, file);
-      syncSessionFile(filePath, config, logger).catch(err => {
-        logger.error(`Initial sync error for ${file}: ${String(err)}`);
-      });
+      syncSessionFile(filePath, config, logger).catch(() => {});
     }
   } catch (err) {
-    logger.error(`Failed to list sessions for initial sync: ${String(err)}`);
+    logger.error(`Failed initial sync: ${String(err)}`);
   }
 
   logger.info(`Watching ${sessionsDir} for session changes`);
 }
 
 async function syncSessionFile(filePath: string, config: PluginConfig, logger: Logger): Promise<void> {
+  // Prune sync state periodically
+  prunesSyncState();
+
   const state = syncState.get(filePath) || { lastLineCount: 0, lastTimestamp: '' };
 
   let content: string;
   try {
     content = fs.readFileSync(filePath, 'utf-8');
-  } catch (err) {
+  } catch {
     return;
   }
 
   const lines = content.trim().split('\n');
-
-  if (lines.length <= state.lastLineCount) {
-    return;
-  }
+  if (lines.length <= state.lastLineCount) return;
 
   const newLines = lines.slice(state.lastLineCount);
   const messages: SessionMessage[] = [];
@@ -898,7 +975,7 @@ async function syncSessionFile(filePath: string, config: PluginConfig, logger: L
         messages.push(parsed);
       }
     } catch {
-      // Skip invalid lines
+      // Skip
     }
   }
 
@@ -909,33 +986,30 @@ async function syncSessionFile(filePath: string, config: PluginConfig, logger: L
 
   const sessionId = config.sessionId || path.basename(filePath, '.jsonl');
 
-  let successCount = 0;
-  let failCount = 0;
-
   for (const msg of messages) {
+    if (shouldSkipOnelist()) {
+      logger.debug('Onelist circuit breaker open - skipping sync');
+      break;
+    }
+
     try {
       await sendToOnelist(config, sessionId, msg, logger);
-      successCount++;
+      recordOnelistSuccess();
     } catch (err) {
-      failCount++;
-      if (failCount <= 3) {
-        logger.error(`Failed to send message to Onelist: ${String(err)}`);
+      recordOnelistFailure();
+      if (onelistCircuitBreaker.consecutiveFailures <= 3) {
+        logger.error(`Onelist sync failed: ${String(err)}`);
+      } else if (onelistCircuitBreaker.consecutiveFailures === HARD_LIMITS.ONELIST_MAX_CONSECUTIVE_FAILURES) {
+        const backoffMin = Math.round((onelistCircuitBreaker.backoffUntil - Date.now()) / 60000);
+        logger.warn(`Onelist circuit breaker OPEN - backing off for ${backoffMin}m`);
       }
     }
-  }
-
-  if (failCount > 3) {
-    logger.error(`${failCount} total Onelist send failures for ${path.basename(filePath)}`);
   }
 
   syncState.set(filePath, {
     lastLineCount: lines.length,
     lastTimestamp: messages[messages.length - 1]?.timestamp || state.lastTimestamp,
   });
-
-  if (successCount > 0) {
-    logger.debug(`Synced ${successCount} messages from ${path.basename(filePath)}`);
-  }
 }
 
 async function sendToOnelist(config: PluginConfig, sessionId: string, msg: SessionMessage, logger: Logger): Promise<void> {
@@ -944,7 +1018,6 @@ async function sendToOnelist(config: PluginConfig, sessionId: string, msg: Sessi
   }
 
   const url = `${config.apiUrl}/api/v1/chat-stream/append`;
-
   const content = extractTextContent(msg.message?.content);
   if (!content) return;
 
@@ -974,7 +1047,7 @@ async function sendToOnelist(config: PluginConfig, sessionId: string, msg: Sessi
 
     if (!response.ok) {
       const text = await response.text().catch(() => 'unknown');
-      throw new Error(`Onelist API error: ${response.status} - ${text.slice(0, 100)}`);
+      throw new Error(`HTTP ${response.status}: ${text.slice(0, 100)}`);
     }
   } finally {
     clearTimeout(timeout);
