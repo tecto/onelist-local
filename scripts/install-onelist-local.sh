@@ -18,7 +18,7 @@ NC='\033[0m' # No Color
 # Configuration
 ONELIST_USER="onelist"
 ONELIST_HOME="/opt/onelist"
-ONELIST_REPO="https://github.com/stream-onelist/onelist-local.git"
+ONELIST_REPO="https://github.com/trinsiklabs/onelist-local.git"
 ONELIST_BRANCH="main"
 POSTGRES_DB="onelist_prod"
 POSTGRES_USER="onelist"

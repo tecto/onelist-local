@@ -71,7 +71,7 @@ NC='\033[0m' # No Color
 
 # Config
 INSTALL_DIR="${ONELIST_DIR:-$HOME/.onelist}"
-BASE_URL="https://raw.githubusercontent.com/onelist/onelist-local/main/docker"
+BASE_URL="https://raw.githubusercontent.com/trinsiklabs/onelist-local/main/docker"
 
 # Determine which compose files to download
 COMPOSE_FILES="docker-compose.yml"

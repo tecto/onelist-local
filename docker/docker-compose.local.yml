@@ -36,7 +36,7 @@ services:
   # Onelist - Memory system with River agent
   # ===========================================
   onelist:
-    image: ghcr.io/onelist/onelist-local:latest
+    image: ghcr.io/trinsiklabs/onelist-local:latest
     container_name: onelist-app
     restart: unless-stopped
     depends_on:
@@ -105,7 +105,7 @@ services:
   # Setup helper - runs once on first start
   # ===========================================
   setup:
-    image: ghcr.io/onelist/onelist-local:latest
+    image: ghcr.io/trinsiklabs/onelist-local:latest
     container_name: onelist-setup
     depends_on:
       - postgres

@@ -140,7 +140,7 @@ init-env:
 ### Quick Start (Docker - Recommended)
 
 \`\`\`bash
-git clone https://github.com/onelist/onelist-local.git
+git clone https://github.com/trinsiklabs/onelist-local.git
 cd onelist-local
 make setup
 \`\`\`
@@ -194,7 +194,7 @@ nodejs 20.11.0
 
 ### Must Do (Before v1.0)
 
-1. **Publish Docker images** to ghcr.io/onelist/onelist-local:latest
+1. **Publish Docker images** to ghcr.io/trinsiklabs/onelist-local:latest
 2. **Create GitHub Actions** for automated builds
 3. **Add `make test-install`** that spins up in CI
 4. **Consolidate docker-compose files** - too many overlapping variants
@@ -220,7 +220,7 @@ nodejs 20.11.0
 
 ```bash
 # On clean Ubuntu 22.04 VM
-git clone https://github.com/onelist/onelist-local.git
+git clone https://github.com/trinsiklabs/onelist-local.git
 cd onelist-local
 make setup
 ```

@@ -119,7 +119,7 @@ version: '3.8'
 
 services:
   app:
-    image: ghcr.io/onelist/onelist:latest
+    image: ghcr.io/trinsiklabs/onelist-local:latest
     # Or build locally:
     # build:
     #   context: .
