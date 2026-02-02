@@ -32,7 +32,7 @@ services:
   # Onelist Core (API only)
   # ===========================================
   onelist:
-    image: ghcr.io/onelist/onelist-local:latest
+    image: ghcr.io/trinsiklabs/onelist-local:latest
     container_name: onelist-app
     restart: unless-stopped
     depends_on:
@@ -72,7 +72,7 @@ services:
   # Setup (runs once)
   # ===========================================
   setup:
-    image: ghcr.io/onelist/onelist-local:latest
+    image: ghcr.io/trinsiklabs/onelist-local:latest
     container_name: onelist-setup
     depends_on:
       postgres:

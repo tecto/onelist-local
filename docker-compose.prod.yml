@@ -13,7 +13,7 @@ services:
       context: .
       dockerfile: Dockerfile.prod
     # Or use pre-built image:
-    # image: ghcr.io/onelist/onelist:latest
+    # image: ghcr.io/trinsiklabs/onelist-local:latest
     ports:
       - "${PORT:-4000}:4000"
     environment:
