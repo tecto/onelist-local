@@ -176,7 +176,7 @@ defmodule OnelistWeb.Dashboard.TriangleChatLive do
               <span class="badge"><%= @unread_counts[:dm_splntrb_key] %></span>
             <% end %>
           </div>
-          <div class="message-list" id="dm-splntrb-key-messages" phx-update="stream">
+          <div class="message-list" id="dm-splntrb-key-messages">
             <%= for message <- @messages[:dm_splntrb_key] || [] do %>
               <.message_item message={message} />
             <% end %>
@@ -205,7 +205,7 @@ defmodule OnelistWeb.Dashboard.TriangleChatLive do
               <span class="badge"><%= @unread_counts[:dm_splntrb_stream] %></span>
             <% end %>
           </div>
-          <div class="message-list" id="dm-splntrb-stream-messages" phx-update="stream">
+          <div class="message-list" id="dm-splntrb-stream-messages">
             <%= for message <- @messages[:dm_splntrb_stream] || [] do %>
               <.message_item message={message} />
             <% end %>
@@ -232,7 +232,7 @@ defmodule OnelistWeb.Dashboard.TriangleChatLive do
             <span>Key ↔ Stream</span>
             <span style="color: #666; font-size: 0.75rem;">read-only</span>
           </div>
-          <div class="message-list" id="dm-key-stream-messages" phx-update="stream">
+          <div class="message-list" id="dm-key-stream-messages">
             <%= for message <- @messages[:dm_key_stream] || [] do %>
               <.message_item message={message} />
             <% end %>
@@ -251,7 +251,7 @@ defmodule OnelistWeb.Dashboard.TriangleChatLive do
             <span class="badge"><%= @unread_counts[:group] %></span>
           <% end %>
         </div>
-        <div class="message-list" id="group-messages" phx-update="stream">
+        <div class="message-list" id="group-messages">
           <%= for message <- @messages[:group] || [] do %>
             <.message_item message={message} />
           <% end %>
