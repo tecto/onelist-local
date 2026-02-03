@@ -19,6 +19,12 @@ defmodule Onelist.OpenClaw.SessionImporter do
       # Import single file
       {:ok, result} = SessionImporter.import_session_file(user, path)
 
+      # Import with CLI progress bar
+      alias Onelist.OpenClaw.Progress
+      SessionImporter.import_directory(user, "~/.openclaw",
+        progress: &Progress.cli_reporter/3
+      )
+
   ## Memory Chain Integrity
 
   Sessions are imported in chronological order (by earliest message timestamp)
@@ -44,6 +50,16 @@ defmodule Onelist.OpenClaw.SessionImporter do
   - `:after` - Only import sessions after this DateTime
   - `:before` - Only import sessions before this DateTime
   - `:dry_run` - Don't actually import, just return what would be imported
+  - `:progress` - Callback function `(current, total, context) -> any()` for progress reporting
+
+  ## Progress Callback
+
+  The progress callback receives:
+  - `current` - Current session number (1-indexed)
+  - `total` - Total number of sessions
+  - `context` - Map with `:file_path`, `:session_id`, `:status` keys
+
+  Use `Onelist.OpenClaw.Progress.cli_reporter/3` for a CLI progress bar.
 
   ## Returns
 
@@ -52,6 +68,7 @@ defmodule Onelist.OpenClaw.SessionImporter do
   """
   def import_directory(user, path, opts \\ []) do
     dry_run = Keyword.get(opts, :dry_run, false)
+    progress_fn = Keyword.get(opts, :progress)
 
     case list_sessions(path, opts) do
       {:ok, sessions} when dry_run ->
@@ -63,22 +80,54 @@ defmodule Onelist.OpenClaw.SessionImporter do
          }}
 
       {:ok, sessions} ->
+        total = length(sessions)
+
         results =
-          Enum.map(sessions, fn session ->
-            case import_session_file(user, session.path) do
-              {:ok, result} -> {:ok, result}
-              {:error, reason} -> {:error, session.path, reason}
+          sessions
+          |> Enum.with_index(1)
+          |> Enum.map(fn {session, index} ->
+            # Report progress before import
+            if progress_fn do
+              progress_fn.(index, total, %{
+                file_path: session.path,
+                session_id: session.session_id,
+                status: :importing
+              })
             end
+
+            result =
+              case import_session_file(user, session.path) do
+                {:ok, result} -> {:ok, result}
+                {:error, reason} -> {:error, session.path, reason}
+              end
+
+            # Report completion status
+            if progress_fn do
+              status = if match?({:ok, _}, result), do: :complete, else: :failed
+
+              progress_fn.(index, total, %{
+                file_path: session.path,
+                session_id: session.session_id,
+                status: status
+              })
+            end
+
+            result
           end)
 
         imported = Enum.count(results, &match?({:ok, _}, &1))
         failed = Enum.count(results, &match?({:error, _, _}, &1))
 
+        # Finish progress display
+        if progress_fn do
+          Onelist.OpenClaw.Progress.finish(total, failed: failed)
+        end
+
         {:ok,
          %{
            imported_count: imported,
            failed_count: failed,
-           total: length(sessions),
+           total: total,
            results: results
          }}
 

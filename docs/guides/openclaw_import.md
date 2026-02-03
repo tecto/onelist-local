@@ -150,6 +150,39 @@ alias Onelist.OpenClaw.SessionImporter
 {:ok, result} = SessionImporter.import_session_file(user, "/path/to/session.jsonl")
 ```
 
+### CLI Progress Bar
+
+For interactive imports, use the built-in progress reporter:
+
+```elixir
+alias Onelist.OpenClaw.{SessionImporter, Progress}
+
+# Import with CLI progress bar
+{:ok, result} = SessionImporter.import_directory(user, "~/.openclaw",
+  progress: &Progress.cli_reporter/3
+)
+```
+
+This displays a live-updating progress bar:
+```
+[████████████░░░░░░░░░░░░░░░░░░] (15 of 92) 16% importing cli-042...
+```
+
+For custom progress reporting, provide your own callback:
+
+```elixir
+my_reporter = fn current, total, context ->
+  IO.puts("[\#{current}/\#{total}] \#{context.status}: \#{context.session_id}")
+end
+
+SessionImporter.import_directory(user, path, progress: my_reporter)
+```
+
+The callback receives:
+- `current` - Current session number (1-indexed)
+- `total` - Total number of sessions
+- `context` - Map with `:file_path`, `:session_id`, `:status` (`:importing`, `:complete`, `:failed`)
+
 ### Background Import via Oban
 
 For large imports, use the worker to process files in the background:

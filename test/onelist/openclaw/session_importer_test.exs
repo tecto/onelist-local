@@ -271,6 +271,38 @@ defmodule Onelist.OpenClaw.SessionImporterTest do
 
       assert result.imported_count == 0
     end
+
+    test "calls progress callback during import", %{user: user, sessions_path: sessions_path} do
+      # Create test sessions
+      File.write!(
+        Path.join(sessions_path, "session_a.jsonl"),
+        session_content("2026-01-30T08:00:00Z")
+      )
+
+      File.write!(
+        Path.join(sessions_path, "session_b.jsonl"),
+        session_content("2026-01-30T10:00:00Z")
+      )
+
+      # Track progress calls
+      test_pid = self()
+
+      progress_fn = fn current, total, context ->
+        send(test_pid, {:progress, current, total, context})
+      end
+
+      {:ok, _result} =
+        SessionImporter.import_directory(user, @fixtures_path, progress: progress_fn)
+
+      # Should receive progress calls for each session
+      # Session 1: importing then complete
+      assert_receive {:progress, 1, 2, %{status: :importing, session_id: "session_a"}}
+      assert_receive {:progress, 1, 2, %{status: :complete, session_id: "session_a"}}
+
+      # Session 2: importing then complete
+      assert_receive {:progress, 2, 2, %{status: :importing, session_id: "session_b"}}
+      assert_receive {:progress, 2, 2, %{status: :complete, session_id: "session_b"}}
+    end
   end
 
   # Helper functions
