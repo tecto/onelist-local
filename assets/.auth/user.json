@@ -1,0 +1,15 @@
+{
+  "cookies": [
+    {
+      "name": "_onelist_key",
+      "value": "XCP.-N4Uewsq_vjiRYbZB_dYijpNvy_jV4w9ss-oJ_tmOtYG3QmIRrt2tYGP3N5oIpVJ_Qyj8MPke5lm5MdRjrzPk0-k_N7E7-25Ud52RHgmxhjQYZa9RGT6JIZM6-SBwkm0MZM_PQ2GFr9gkr7OSSZsOdrspnjTVWs0l_RFIdwrFkUonkWlZCWU_4C5fyulei5e3YuJVfgSNY2B4pK03CJtFT6z_U_or_dLbvYHBwlo5EDLmQ",
+      "domain": "stream.onelist.my",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    }
+  ],
+  "origins": []
+}

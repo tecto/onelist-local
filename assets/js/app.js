@@ -24,6 +24,7 @@ import topbar from "../vendor/topbar"
 import Clipboard from "./hooks/clipboard"
 import EditorHook from "./hooks/editor"
 import ScrollToBottom from "./hooks/scroll_to_bottom"
+import ClearOnSubmit from "./hooks/clear_on_submit"
 
 let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 let liveSocket = new LiveSocket("/live", Socket, {
@@ -32,7 +33,8 @@ let liveSocket = new LiveSocket("/live", Socket, {
   hooks: {
     Clipboard,
     Editor: EditorHook,
-    ScrollToBottom
+    ScrollToBottom,
+    ClearOnSubmit
   }
 })
 

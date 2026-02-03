@@ -181,7 +181,7 @@ defmodule OnelistWeb.Dashboard.TrioChatLive do
             <% end %>
           </div>
           <div class="input-area">
-            <form phx-submit="send_dm" phx-value-channel="dm_splntrb_key">
+            <form phx-submit="send_dm" phx-value-channel="dm_splntrb_key" phx-hook="ClearOnSubmit" id="dm-key-form">
               <input
                 type="text"
                 name="content"
@@ -207,7 +207,7 @@ defmodule OnelistWeb.Dashboard.TrioChatLive do
             <% end %>
           </div>
           <div class="input-area">
-            <form phx-submit="send_dm" phx-value-channel="dm_splntrb_stream">
+            <form phx-submit="send_dm" phx-value-channel="dm_splntrb_stream" phx-hook="ClearOnSubmit" id="dm-stream-form">
               <input
                 type="text"
                 name="content"
@@ -250,7 +250,7 @@ defmodule OnelistWeb.Dashboard.TrioChatLive do
           <% end %>
         </div>
         <div class="input-area">
-          <form phx-submit="send_group">
+          <form phx-submit="send_group" phx-hook="ClearOnSubmit" id="group-form">
             <input
               type="text"
               name="content"
