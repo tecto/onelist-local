@@ -276,6 +276,11 @@ defmodule OnelistWeb.Router do
     get "/chat-stream/recent", ChatStreamController, :recent
     get "/chat-logs", ChatStreamController, :list_logs
 
+    # OpenClaw session import (historical transcripts)
+    post "/openclaw/import", OpenClawImportController, :create
+    get "/openclaw/import/preview", OpenClawImportController, :preview
+    post "/openclaw/import/file", OpenClawImportController, :import_file
+
     # Embedding management
     get "/embeddings/config", EmbeddingController, :config
     patch "/embeddings/config", EmbeddingController, :update_config
