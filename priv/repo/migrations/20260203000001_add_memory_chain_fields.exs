@@ -42,37 +42,44 @@ defmodule Onelist.Repo.Migrations.AddMemoryChainFields do
 
     # Unique constraint: one sequence number per chain
     create unique_index(:memories, [:chain_id, :memory_sequence],
-      where: "chain_id IS NOT NULL AND memory_sequence IS NOT NULL",
-      name: :memories_chain_sequence_unique_idx)
+             where: "chain_id IS NOT NULL AND memory_sequence IS NOT NULL",
+             name: :memories_chain_sequence_unique_idx
+           )
 
     # Index for chain lookups
     create index(:memories, [:chain_id],
-      where: "chain_id IS NOT NULL",
-      name: :memories_chain_id_idx)
+             where: "chain_id IS NOT NULL",
+             name: :memories_chain_id_idx
+           )
 
     # Index for hash verification
     create index(:memories, [:memory_hash],
-      where: "memory_hash IS NOT NULL",
-      name: :memories_memory_hash_idx)
+             where: "memory_hash IS NOT NULL",
+             name: :memories_memory_hash_idx
+           )
 
     # Index for finding latest in chain
     create index(:memories, [:chain_id, :memory_sequence],
-      where: "chain_id IS NOT NULL",
-      name: :memories_chain_latest_idx)
+             where: "chain_id IS NOT NULL",
+             name: :memories_chain_latest_idx
+           )
 
     # Index for current memories
     create index(:memories, [:user_id, :is_current],
-      where: "is_current = true",
-      name: :memories_is_current_idx)
+             where: "is_current = true",
+             name: :memories_is_current_idx
+           )
 
     # Index for agent attribution
     create index(:memories, [:source_agent_id],
-      where: "source_agent_id IS NOT NULL",
-      name: :memories_source_agent_idx)
+             where: "source_agent_id IS NOT NULL",
+             name: :memories_source_agent_idx
+           )
 
     # Index for content hash (duplicate detection)
     create index(:memories, [:content_hash],
-      where: "content_hash IS NOT NULL",
-      name: :memories_content_hash_idx)
+             where: "content_hash IS NOT NULL",
+             name: :memories_content_hash_idx
+           )
   end
 end

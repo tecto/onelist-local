@@ -118,6 +118,27 @@ defmodule Onelist.Reader.Memory do
     |> foreign_key_constraint(:user_id)
     |> foreign_key_constraint(:supersedes_id)
     |> foreign_key_constraint(:refines_id)
+    |> unique_constraint([:chain_id, :memory_sequence], name: :memories_chain_sequence_unique_idx)
+  end
+
+  @doc """
+  Creates a changeset for updating memory chain fields.
+  Used when marking memories as not current during re-processing.
+  """
+  def chain_changeset(memory, attrs) do
+    memory
+    |> cast(attrs, [
+      :memory_sequence,
+      :previous_memory_hash,
+      :memory_hash,
+      :chain_id,
+      :source_entry_hash,
+      :canonical_timestamp,
+      :content_hash,
+      :source_agent_id,
+      :source_agent_version,
+      :is_current
+    ])
   end
 
   @doc """
@@ -139,7 +160,11 @@ defmodule Onelist.Reader.Memory do
 
     attrs =
       if superseded_by_id do
-        Map.put(attrs, :metadata, Map.put(memory.metadata || %{}, "superseded_by", superseded_by_id))
+        Map.put(
+          attrs,
+          :metadata,
+          Map.put(memory.metadata || %{}, "superseded_by", superseded_by_id)
+        )
       else
         attrs
       end
@@ -161,5 +186,19 @@ defmodule Onelist.Reader.Memory do
   def embedding_changeset(memory, embedding) do
     memory
     |> cast(%{embedding: embedding}, [:embedding])
+  end
+
+  @doc """
+  Returns true if the memory is part of a chain (has chain_id set).
+  """
+  def chained?(memory) do
+    not is_nil(memory.chain_id)
+  end
+
+  @doc """
+  Returns true if this is a current (not superseded) memory.
+  """
+  def is_current?(memory) do
+    memory.is_current == true
   end
 end
