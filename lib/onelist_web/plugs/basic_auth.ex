@@ -1,6 +1,7 @@
 defmodule OnelistWeb.Plugs.BasicAuth do
   @moduledoc """
   HTTP Basic Authentication plug for protected routes.
+  Supports both single-user and multi-user configurations.
   """
 
   import Plug.Conn
@@ -8,14 +9,11 @@ defmodule OnelistWeb.Plugs.BasicAuth do
   def init(opts), do: opts
 
   def call(conn, opts) do
-    username = Keyword.fetch!(opts, :username)
-    password = Keyword.fetch!(opts, :password)
-
     case get_req_header(conn, "authorization") do
       ["Basic " <> encoded] ->
         case Base.decode64(encoded) do
           {:ok, credentials} ->
-            if credentials == "#{username}:#{password}" do
+            if valid_credentials?(credentials, opts) do
               conn
             else
               unauthorized(conn)
@@ -27,6 +25,22 @@ defmodule OnelistWeb.Plugs.BasicAuth do
 
       _ ->
         unauthorized(conn)
+    end
+  end
+
+  # Multi-user mode: list of {username, password} tuples
+  defp valid_credentials?(credentials, opts) when is_list(opts) do
+    case Keyword.get(opts, :users) do
+      users when is_list(users) ->
+        Enum.any?(users, fn {username, password} ->
+          credentials == "#{username}:#{password}"
+        end)
+
+      nil ->
+        # Single-user mode (backwards compatible)
+        username = Keyword.fetch!(opts, :username)
+        password = Keyword.fetch!(opts, :password)
+        credentials == "#{username}:#{password}"
     end
   end
 

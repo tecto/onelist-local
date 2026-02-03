@@ -62,11 +62,20 @@ defmodule OnelistWeb.Router do
     get "/:slug", PageController, :roadmap_detail
   end
 
-  # Protected workspace docs with HTTP Basic Auth (stronger password)
+  # Protected workspace/watch docs with HTTP Basic Auth (multi-user)
   pipeline :workspace_auth do
     plug OnelistWeb.Plugs.BasicAuth,
-      username: "splntrb",
-      password: "slLEcft0LCpFuPOjHWluFfzdcblmhYM9FzZKCvmD"
+      users: [
+        {"splntrb", "slLEcft0LCpFuPOjHWluFfzdcblmhYM9FzZKCvmD"},
+        {"cynthia", "58EquKp9xs16AN1v7n5V"},
+        {"devin", "mF1BZFQJHO9x0L7uWav3"},
+        {"danielle", "dXdkrBgzlqe1dTwByutk"},
+        {"eq", "1oZBOw1VJYZUgOEJ9IWc"},
+        {"mal", "Snabi8OG2aDKt1ykEwz7"},
+        {"ari", "N4iq2wlY4vrsELkbbA4Y"},
+        {"mae", "U3xPNAZmUB5r8IvZUdDO"},
+        {"opey", "wfk2OVIFiYXvKke9Emkv"}
+      ]
   end
 
   scope "/workspace", OnelistWeb do
@@ -75,6 +84,42 @@ defmodule OnelistWeb.Router do
     get "/", WorkspaceController, :index
     get "/raw/*path", WorkspaceController, :raw
     get "/*path", WorkspaceController, :show
+  end
+
+  # Claude Code Swarm docs with HTTP Basic Auth (same as workspace)
+  scope "/swarm", OnelistWeb do
+    pipe_through [:workspace_auth]
+
+    get "/", SwarmController, :index
+    get "/changelog", SwarmController, :changelog
+    get "/raw/*path", SwarmController, :raw
+    get "/*path", SwarmController, :show
+  end
+
+  # ===========================================
+  # /watch - Unified monitoring dashboard (PLAN-027)
+  # ===========================================
+  scope "/watch", OnelistWeb do
+    pipe_through [:workspace_auth]
+
+    get "/", WatchController, :index
+    get "/workspace", WorkspaceController, :index
+    get "/workspace/raw/*path", WorkspaceController, :raw
+    get "/workspace/*path", WorkspaceController, :show
+    get "/swarm", SwarmController, :index
+    get "/swarm/changelog", SwarmController, :changelog
+    get "/swarm/raw/*path", SwarmController, :raw
+    get "/swarm/*path", SwarmController, :show
+  end
+
+  scope "/watch", OnelistWeb do
+    pipe_through [:browser, :workspace_auth]
+
+    live_session :watch_livelog,
+      on_mount: [{OnelistWeb.LiveAuth, :maybe_authenticated}],
+      layout: {OnelistWeb.Layouts, :public} do
+      live "/livelog", LivelogLive
+    end
   end
 
   pipeline :api_authenticated do
