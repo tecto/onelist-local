@@ -122,6 +122,17 @@ defmodule OnelistWeb.Router do
     end
   end
 
+  # Triangle Chat Dashboard (PLAN-048)
+  scope "/dashboard", OnelistWeb do
+    pipe_through [:browser, :workspace_auth]
+
+    live_session :triangle_chat,
+      on_mount: [{OnelistWeb.LiveAuth, :maybe_authenticated}],
+      layout: {OnelistWeb.Layouts, :public} do
+      live "/", Dashboard.TriangleChatLive
+    end
+  end
+
   pipeline :api_authenticated do
     plug :accepts, ["json"]
     plug OnelistWeb.Plugs.ApiAuthenticate
@@ -320,6 +331,14 @@ defmodule OnelistWeb.Router do
     get "/chat-stream", ChatStreamController, :index
     get "/chat-stream/recent", ChatStreamController, :recent
     get "/chat-logs", ChatStreamController, :list_logs
+
+    # Triangle Chat (PLAN-048) - splntrb, Key, Stream communication
+    post "/chat/send", TriangleChatController, :send
+    get "/chat/messages", TriangleChatController, :messages
+    get "/chat/unread", TriangleChatController, :unread
+    post "/chat/mark_read", TriangleChatController, :mark_read
+    get "/chat/channels", TriangleChatController, :channels
+    get "/chat/status", TriangleChatController, :status
 
     # OpenClaw session import (historical transcripts)
     post "/openclaw/import", OpenClawImportController, :create
