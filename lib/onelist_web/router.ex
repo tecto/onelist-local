@@ -49,89 +49,67 @@ defmodule OnelistWeb.Router do
     get "/health", HealthController, :index
   end
 
-  # Protected roadmap with HTTP Basic Auth
-  pipeline :roadmap_auth do
-    plug OnelistWeb.Plugs.BasicAuth, username: "splntrb", password: "notToday2026!!!"
+  # ===========================================
+  # WATCH ROUTES - Phoenix Session Auth (PLAN-051)
+  # Requires "watch" or "admin" role
+  # ===========================================
+
+  # Pipeline for watch-protected controller routes
+  pipeline :watch_protected do
+    plug :browser
+    plug OnelistWeb.Plugs.Authenticate
+    plug OnelistWeb.Plugs.RequireWatchAccess
   end
 
+  # Raw file downloads - need controller for send_file
+  scope "/workspace", OnelistWeb do
+    pipe_through [:watch_protected]
+
+    get "/raw/*path", WorkspaceController, :raw
+  end
+
+  scope "/swarm", OnelistWeb do
+    pipe_through [:watch_protected]
+
+    get "/raw/*path", SwarmController, :raw
+  end
+
+  # Roadmap - static HTML files
   scope "/roadmap", OnelistWeb do
-    pipe_through [:roadmap_auth]
+    pipe_through [:watch_protected]
 
     get "/", PageController, :roadmap_index
     get "/index.html", PageController, :roadmap_index_html
     get "/:slug", PageController, :roadmap_detail
   end
 
-  # Protected workspace/watch docs with HTTP Basic Auth (multi-user)
-  pipeline :workspace_auth do
-    plug OnelistWeb.Plugs.BasicAuth,
-      users: [
-        {"splntrb", "slLEcft0LCpFuPOjHWluFfzdcblmhYM9FzZKCvmD"},
-        {"cynthia", "58EquKp9xs16AN1v7n5V"},
-        {"devin", "mF1BZFQJHO9x0L7uWav3"},
-        {"danielle", "dXdkrBgzlqe1dTwByutk"},
-        {"eq", "1oZBOw1VJYZUgOEJ9IWc"},
-        {"mal", "Snabi8OG2aDKt1ykEwz7"},
-        {"ari", "N4iq2wlY4vrsELkbbA4Y"},
-        {"mae", "U3xPNAZmUB5r8IvZUdDO"},
-        {"opey", "wfk2OVIFiYXvKke9Emkv"}
-      ]
-  end
-
-  scope "/workspace", OnelistWeb do
-    pipe_through [:workspace_auth]
-
-    get "/", WorkspaceController, :index
-    get "/raw/*path", WorkspaceController, :raw
-    get "/*path", WorkspaceController, :show
-  end
-
-  # Claude Code Swarm docs with HTTP Basic Auth (same as workspace)
-  scope "/swarm", OnelistWeb do
-    pipe_through [:workspace_auth]
-
-    get "/", SwarmController, :index
-    get "/changelog", SwarmController, :changelog
-    get "/raw/*path", SwarmController, :raw
-    get "/*path", SwarmController, :show
-  end
-
-  # ===========================================
-  # /watch - Unified monitoring dashboard (PLAN-027)
-  # ===========================================
+  # Watch LiveViews - all protected by :ensure_watch_access
   scope "/watch", OnelistWeb do
-    pipe_through [:workspace_auth]
+    pipe_through [:browser]
 
-    get "/", WatchController, :index
-    get "/workspace", WorkspaceController, :index
-    get "/workspace/raw/*path", WorkspaceController, :raw
-    get "/workspace/*path", WorkspaceController, :show
-    get "/swarm", SwarmController, :index
-    get "/swarm/changelog", SwarmController, :changelog
-    get "/swarm/raw/*path", SwarmController, :raw
-    get "/swarm/*path", SwarmController, :show
-  end
-
-  scope "/watch", OnelistWeb do
-    pipe_through [:browser, :workspace_auth]
-
-    live_session :watch_livelog,
-      on_mount: [{OnelistWeb.LiveAuth, :maybe_authenticated}],
+    live_session :watch,
+      on_mount: [{OnelistWeb.LiveAuth, :ensure_watch_access}],
       layout: {OnelistWeb.Layouts, :public} do
+      live "/", Watch.WatchLive
+      live "/workspace", Watch.WorkspaceLive, :index
+      live "/workspace/*path", Watch.WorkspaceLive, :show
+      live "/swarm", Watch.SwarmLive, :index
+      live "/swarm/*path", Watch.SwarmLive, :show
       live "/livelog", LivelogLive
     end
   end
 
-  # Triangle Chat Dashboard (PLAN-048)
+  # Triangle Chat Dashboard (PLAN-048) - protected by watch access
   scope "/dashboard", OnelistWeb do
-    pipe_through [:browser, :workspace_auth]
+    pipe_through [:browser]
 
     live_session :triangle_chat,
-      on_mount: [{OnelistWeb.LiveAuth, :maybe_authenticated}],
+      on_mount: [{OnelistWeb.LiveAuth, :ensure_watch_access}],
       layout: {OnelistWeb.Layouts, :public} do
       live "/", Dashboard.TriangleChatLive
     end
   end
+
 
   pipeline :api_authenticated do
     plug :accepts, ["json"]

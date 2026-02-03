@@ -81,6 +81,27 @@ defmodule OnelistWeb.LiveAuth do
     end
   end
 
+  def on_mount(:ensure_watch_access, _params, session, socket) do
+    socket = assign_current_user(socket, session)
+
+    if has_watch_access?(socket.assigns.current_user) do
+      {:cont, socket}
+    else
+      socket =
+        socket
+        |> put_flash(:error, "You need watch access to view this page.")
+        |> redirect(to: "/login")
+
+      {:halt, socket}
+    end
+  end
+
+  defp has_watch_access?(nil), do: false
+  defp has_watch_access?(user) do
+    roles = user.roles || []
+    "watch" in roles or "admin" in roles
+  end
+
   def on_mount(:maybe_authenticated, _params, session, socket) do
     {:cont, assign_current_user(socket, session)}
   end

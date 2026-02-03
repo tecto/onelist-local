@@ -53,6 +53,10 @@ defmodule Onelist.Accounts.User do
     field :last_weekly_review, :utc_datetime_usec
     field :gtd_settings, :map, default: %{}
 
+    # Role-based access control
+    # Possible roles: "admin", "watch"
+    field :roles, {:array, :string}, default: []
+
     has_many :sessions, Onelist.Accounts.Session
     has_many :social_accounts, SocialAccount
 
